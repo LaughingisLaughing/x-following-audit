@@ -66,6 +66,7 @@ Run `python3 xfa.py audit --help` for the full list.
 - Unfollow slowly: at most 20 accounts per hour and 100 per day, with breaks in between, or X may flag your account.
 - Your API key is only sent to api.twitterapi.io. Nothing else leaves your machine.
 - Protected accounts can't be checked; they are listed separately.
+- twitterapi.io's following list sometimes holds more accounts than the following count X shows. The extra ones are accounts you no longer follow, and they can end up among the candidates. The script points this out in the summary and at the top of the report. When you unfollow, skip any account whose button says Follow instead of Following.
 - If you follow many people, `--interaction` flags most of them, because most accounts never reply to you. It is most useful as the extra 和你互动 (interactions with you) column in the inactive list.
 - `--engine grok` and `grok_bridge.py` are for people who run [Hermes Agent](https://github.com/NousResearch/hermes-agent) signed in with SuperGrok. Everyone else can ignore them.
 

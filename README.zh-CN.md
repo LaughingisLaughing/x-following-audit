@@ -66,6 +66,7 @@ python3 xfa.py audit your_handle
 - 取关请放慢：每小时不超过 20 个，每天不超过 100 个，中间留出间隔，否则可能触发 X 的风控。
 - API key 只会发给 api.twitterapi.io，其他数据都不会离开你的电脑。
 - 私密账号看不到帖子，只单独列出，不做判定。
+- twitterapi.io 的关注名单有时比 X 显示的关注数多，多出来的是你已经不再关注的账号，会混在候选名单里。脚本发现名单多出来时，会在摘要和报告开头提示。取关时按钮显示「关注」而不是「正在关注」的，直接跳过。
 - 关注的人很多时，`--interaction` 会标出其中的大部分，因为大多数账号本来就不会回复你。它最有用的地方，是不活跃列表里多出来的「和你互动」那一列。
 - `--engine grok` 和 `grok_bridge.py` 是给本机装了 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 并登录 SuperGrok 的人用的，其他人可以忽略。
 

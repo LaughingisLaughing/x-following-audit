@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT = Path("~/Downloads/x-following-audit").expanduser()
 LANG = "zh"  # set from --lang; picks the language of progress and error messages
@@ -267,6 +267,14 @@ def compact_user(u):
     }
 
 
+def fetch_following_count(api, target):
+    """The Following number X shows on the target's profile, or None."""
+    try:
+        return int((api.get("/twitter/user/info", {"userName": target}).get("data") or {}).get("following"))
+    except (ApiError, TypeError, ValueError):
+        return None
+
+
 def fetch_followings(api, cache, target, refresh, log):
     """Followings list, cached 7 days; an interrupted fetch resumes from its cursor."""
     key = f"{NS}:followings:{target.lower()}:v1"
@@ -299,9 +307,25 @@ def fetch_followings(api, cache, target, refresh, log):
         log(t(f"  关注名单：已拿到 {len(users)} 个…", f"  Following list: {len(users)} so far…"))
     data = {"users": users, "complete": complete, "cursor": cursor,
             "fetched": utcnow().isoformat(timespec="seconds")}
+    if complete:
+        # read right after the list, so following_gap compares two numbers from the same moment
+        data["x_following"] = fetch_following_count(api, target)
     if users:
         cache.put(key, data, FOLLOWINGS_TTL)
     return data, "api"
+
+
+def following_gap(fdata):
+    """How many more accounts the API list holds than the Following number X shows.
+
+    twitterapi.io's list can include accounts that are no longer followed: on 2026-10-23
+    it had 3,791 while the profile showed 3,756, and the unfollow candidates turned out
+    to hold 36 accounts no longer followed. Only a complete list read together with the
+    count is compared; a list cached before this check has no count."""
+    shown = fdata.get("x_following")
+    if not fdata.get("complete") or shown is None:
+        return 0
+    return max(0, len(fdata["users"]) - shown)
 
 
 def fetch_activity_api(api, user):
@@ -561,6 +585,12 @@ def write_reports(rows, meta, out_dir, target, stem):
     n_pending = sum(1 for r in rows if r["status"] == "pending")
 
     c = meta["counts"]
+    gap_note = [] if not meta.get("gap") else [
+        f"> ⚠️ 接口名单有 {meta['listed']:,} 个，比 X 显示的关注数（{meta['x_following']:,}）多 {meta['gap']} 个。"
+        "多出来的多半是你已经不再关注的账号，会混在下面的候选里，实测集中在「不活跃」表最前面"
+        "（最后发帖为「无」或很早的账号）。取关时按钮显示「关注」而不是「正在关注」的，直接跳过。",
+        "",
+    ]
     parts = [
         f"# @{target} 关注列表检查（{meta['date']}）",
         "",
@@ -571,6 +601,7 @@ def write_reports(rows, meta, out_dir, target, stem):
         "",
         "> 取关请放慢：每小时不超过 20 个，每天不超过 100 个，中间留间隔，避免触发 X 风控。",
         "",
+        *gap_note,
         f"## 不活跃：{meta['inactive_label']}（{len(inactive)} 个）",
         "",
         table(inactive) if inactive else "无",
@@ -651,6 +682,10 @@ def audit(cfg):
     if not fdata["complete"]:
         log(t(f"⚠️  名单未拉完（{len(users)} 个），先按已拿到的分析",
               f"⚠️  Following list incomplete ({len(users)} accounts); analysing what was fetched"))
+    gap = following_gap(fdata)
+    if fdata.get("x_following") is not None:
+        log(t(f"关注数核对：接口名单 {len(users)} 个，X 显示关注 {fdata['x_following']} 个",
+              f"Following count check: {len(users)} on the API list, {fdata['x_following']} shown on X"))
     if cfg.limit:
         users = users[:cfg.limit]
     as_of = parse_iso(fdata["fetched"])
@@ -777,6 +812,7 @@ def audit(cfg):
         "low_label": f"{cfg.low_days} 天内少于 {cfg.low_tweets} 条",
         "interaction_label": inter_label,
         "counts": {"total": len(users), "decided": len(decided)},
+        "gap": gap, "listed": len(fdata["users"]), "x_following": fdata.get("x_following"),
     }
     md_path, csv_path = write_reports(rows, meta, cfg.out, target, stem)
 
@@ -811,6 +847,12 @@ def audit(cfg):
         ]
         if prompt_file:
             lines.append(f"grok.com 指令（{len(still)} 个未查账号，{n_chunks} 段，逐段贴进 grok.com）：{prompt_file}")
+    if gap:
+        lines.insert(2, t(f"⚠️  接口名单比 X 显示的关注数（{fdata['x_following']:,}）多 {gap} 个，多出来的多半已经不在你的关注里，"
+                          "取关时按钮显示「关注」的直接跳过",
+                          f"⚠️  The API list has {gap} more accounts than the {fdata['x_following']:,} X shows you following; "
+                          "the extra ones are most likely accounts you no longer follow. When unfollowing, skip any whose "
+                          "button says \"Follow\""))
     print("\n".join(lines))
 
 
