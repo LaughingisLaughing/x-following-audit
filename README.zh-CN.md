@@ -4,10 +4,11 @@
 
 找出你在 X（Twitter）上关注的账号里值得取关的那些：半年没发帖、一年发不到 5 条，或者（可选）几乎从不回复、提到你。
 
-它是纯 Python，不依赖任何第三方库，在你自己的电脑（或 agent 的云电脑）上，用你自己的 [twitterapi.io](https://twitterapi.io/?ref=Laughing) key 运行。分两部分：
+它是纯 Python，不依赖任何第三方库，在你自己的电脑（或 agent 的云电脑）上，用你自己的 [twitterapi.io](https://twitterapi.io/?ref=Laughing) key 运行。分三部分：
 
 - `audit`：找出不活跃、低活跃的账号，不会替你取关任何人。
 - 分级清理（0.4.0 新增）：把你关注的人分成几级，你选要清理哪几级，然后只按你确认过的名单，在你自己已登录的浏览器里慢慢取关。见[分级清理](#分级清理040)。
+- 免 key 快速检查（0.5.0 新增）：在 Grok Bot 里没有 twitterapi.io key 也能用，只看谁很久没发帖、谁回关了你、谁是私密账号。见[在 Grok Bot 里用](#在-grok-bot-里用)。
 
 它接替已经下线的网页版「X Follower Tool / 关注列表分析器」（twitter-unfollow.up.railway.app），判定规则不变。
 
@@ -91,6 +92,13 @@ git clone https://github.com/LaughingisLaughing/x-following-audit.git && cd x-fo
 ### 在 Grok Bot 里用
 
 整个流程可以放在 [Grok Bot](https://docs.x.ai/grok-bot/overview) 的云电脑上跑，用 routine 每两小时续跑一批。先看 [cloud/grok-bot-first-run.zh-CN.md](cloud/grok-bot-first-run.zh-CN.md)，再把 [cloud/grok-bot-skill.zh-CN.md](cloud/grok-bot-skill.zh-CN.md) 和 [cloud/grok-bot-routine.zh-CN.md](cloud/grok-bot-routine.zh-CN.md) 发给 Bot。
+
+**没有 twitterapi.io key 也能用（快速检查，0.5.0）**：
+
+- Bot 用自带的 X 工具取数，存成文件，`python3 xfa.py quick <你的账号> --me ... --following ...` 只读这些文件。关注名单要用 Grok Bot 里连接的 X 插件，会从你的 X 开发者账号按量扣费（每个关注约 0.001-0.01 美元），Bot 会先报数、等你确认。
+- 只判断「当前帖子计数为 0」和「半年以上没发帖」：先按资料筛出来，再逐个复查时间线（含回复和转发）确认，才进二级。回关了的单列成互关。
+- 不看内容，也不核对你和他们的互动；结果不明的账号没法再用接口核对，只会保持不明、不会再被点。
+- Grok Bot 一轮任务最长 50 分钟，任务之间云电脑会休眠，所以每一批取关都在同一轮任务里开始、等完、同步（`batch` 要带 `--task-start`）。
 
 ## 输出
 

@@ -4,10 +4,11 @@
 
 Find the accounts in your X (Twitter) following list that are worth unfollowing: no posts in the last 6 months, fewer than 5 posts in the last year, or (optional) almost never replying to or mentioning you.
 
-It is plain Python with no dependencies, run on your own machine (or an agent's cloud computer) with your own [twitterapi.io](https://twitterapi.io/?ref=Laughing) API key. It comes in two parts:
+It is plain Python with no dependencies, run on your own machine (or an agent's cloud computer) with your own [twitterapi.io](https://twitterapi.io/?ref=Laughing) API key. It comes in three parts:
 
 - `audit` finds inactive and low-activity accounts. It never unfollows anyone.
 - The tiered cleanup (new in 0.4.0) sorts everyone you follow into tiers, lets you pick which tiers to drop, and then unfollows only the list you confirmed, slowly, in your own signed-in browser. See [Tiered cleanup](#tiered-cleanup-040).
+- The quick check (new in 0.5.0) works in Grok Bot without a twitterapi.io key and looks only at who has not posted for a long time, who follows you back and who is private. See [Use it in Grok Bot](#use-it-in-grok-bot).
 
 This is the successor to the retired web app "X Follower Tool" (twitter-unfollow.up.railway.app). The rules are the same.
 
@@ -91,6 +92,13 @@ git clone https://github.com/LaughingisLaughing/x-following-audit.git && cd x-fo
 ### Use it in Grok Bot
 
 The whole flow can run on a [Grok Bot](https://docs.x.ai/grok-bot/overview) cloud computer, with a routine continuing the batches every two hours. Start with [cloud/grok-bot-first-run.en.md](cloud/grok-bot-first-run.en.md), then send the Bot [cloud/grok-bot-skill.en.md](cloud/grok-bot-skill.en.md) and [cloud/grok-bot-routine.en.md](cloud/grok-bot-routine.en.md).
+
+**Without a twitterapi.io key (quick check, 0.5.0)**:
+
+- The Bot fetches the data with its own X tools and saves it as files; `python3 xfa.py quick <your handle> --me ... --following ...` only reads those files. The following list needs the X plugin connected in Grok Bot, billed to your X developer account per account read (about $0.001-0.01 each); the Bot quotes the amount and waits for your yes.
+- It only decides "current post count 0" and "no post in six months or more": the profiles pick the candidates, and each one's timeline (replies and reposts included) must confirm it before tier 2. Accounts that follow you back are listed as mutuals.
+- No content, and no check of your interactions with them; an unclear result cannot be re-checked by API, so it stays unclear and is never clicked again.
+- A Grok Bot task is stopped after 50 minutes and the cloud computer sleeps between tasks, so every batch is started, waited for and synced inside one task (`batch` needs `--task-start`).
 
 ## Output
 

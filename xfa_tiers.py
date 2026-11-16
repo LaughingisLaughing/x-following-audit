@@ -82,6 +82,28 @@ DEFAULT_POLICY = {
     "timezone": "UTC",           # for the calendar-day cap; an IANA name, or +08:00
 }
 
+# On Grok Bot a batch has to finish inside one task: a task is stopped after 50 minutes, one command blocks for at
+# most 13, and between tasks the cloud computer sleeps and page timers stop (first cloud run, 2026-11-16). 10
+# accounts at up to 210 s apart fit in 35 minutes; the rest of the 50 is for starting the batch, reading the result
+# and syncing. A batch every two hours gives 8 a day, so 80. policy.json may lower these, never raise the caps.
+RUNTIMES = ("local", "grok-bot")
+CLOUD_POLICY = {"batch_max": 10, "batch_minutes": 35, "daily_target": 80}
+CLOUD_CAPS = {"batch_max": 10, "batch_minutes": 35}
+TASK_MINUTES = 40           # on Grok Bot a batch also ends this long after its task began (batch --task-start)
+QUICK_MAX_AGE_DAYS = 3      # a quick check's data must be this fresh when a plan is made and when it is approved
+
+
+def quick_data_problem(fetched, now):
+    """Why a quick check's data is too old for a plan, or None."""
+    at = parse_time(fetched)
+    if not at:
+        return t("快速检查的结果里没有取数时间，重新跑 quick", "The quick check has no fetch time: run quick again")
+    if now - at > timedelta(days=QUICK_MAX_AGE_DAYS):
+        return t(f"快速检查的数据是 {(now - at).days} 天前拉的，超过 {QUICK_MAX_AGE_DAYS} 天：重新拉数据、重新跑 quick 再生成计划",
+                 f"The quick check's data is {(now - at).days} days old, more than {QUICK_MAX_AGE_DAYS}: fetch again and rerun "
+                 f"quick before planning")
+    return None
+
 # Reasons the data proves on its own: tier 2 even without a content review.
 HARD = ["inactive", "low_activity", "marketing"]
 # How much and what kind an account posts: measurable, but whether it is bad depends on the content,
@@ -123,6 +145,19 @@ LABELS = {
     "no_posts_visible": ("有帖子数，却一条也看不到", "Has posts, but none visible"),
     "mutual_unknown": ("不确定是否互关", "Mutual status unknown"),
     "done": ("已经取关或已不在关注", "Already unfollowed or no longer followed"),
+    # quick check (no key)
+    "quick_active": ("本次没发现取关理由（快速检查只看活跃度，没看内容）",
+                     "No reason found (the quick check looks at activity only, not content)"),
+    "active_timeline": ("复查时间线发现近期还在发帖", "Its timeline shows recent posts"),
+    "inactive_confirmed": ("{inactive_days} 天以上没发帖（复查时间线确认，含回复和转发）",
+                           "No post in {inactive_days}+ days (timeline checked, replies and reposts included)"),
+    "zero_posts": ("当前帖子计数为 0，时间线也是空的", "Current post count 0 and an empty timeline"),
+    "needs_timeline": ("看起来不活跃，等复查时间线", "Looks inactive; its timeline is not checked yet"),
+    "timeline_unavailable": ("复查时间线没拿到", "Its timeline could not be read"),
+    "no_profile": ("没拿到资料", "No profile data"),
+    "timeline_inconsistent": ("复查的时间线里没有资料说的那条最近一帖（旧文件、过滤过，或帖子没了）",
+                              "The timeline lacks the post the profile calls the latest (stale, filtered, or gone)"),
+    "privacy_conflict": ("名单和补充资料对是否私密说法不一", "The list and the extra profiles disagree on privacy"),
 }
 TAGS = {"giveaway", "shill", "bot", "dead_project", "reposts", "rare", "language", "off_topic", "low_signal",
         "source", "relationship", "other"}
@@ -252,11 +287,29 @@ def parse_time(s):
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
+def runtime_of(user_policy):
+    """Where batches run: XFA_RUNTIME, else "runtime" in policy.json, else grok-bot on a cloud computer with a
+    writable /workspace and local everywhere else."""
+    r = str(os.environ.get("XFA_RUNTIME") or user_policy.get("runtime") or "").strip().lower()
+    if r:
+        if r not in RUNTIMES:
+            sys.exit(t(f"认不出运行环境 {r!r}：只能是 {', '.join(RUNTIMES)}", f"Unknown runtime {r!r}: use one of {', '.join(RUNTIMES)}"))
+        return r
+    return "grok-bot" if xfa.on_cloud_computer() else "local"
+
+
 def load_policy(od):
+    user = read_json(od / "policy.json", {}) or {}
     p = dict(DEFAULT_POLICY)
-    for k, v in (read_json(od / "policy.json", {}) or {}).items():
-        if k in p:
+    p["runtime"] = runtime_of(user)
+    if p["runtime"] == "grok-bot":
+        p.update(CLOUD_POLICY)
+    for k, v in user.items():
+        if k in p and k != "runtime":
             p[k] = v
+    if p["runtime"] == "grok-bot":   # an older policy.json written for local batches cannot stretch a cloud batch
+        for k, cap in CLOUD_CAPS.items():
+            p[k] = min(p[k], cap)
     return p
 
 
@@ -399,12 +452,24 @@ class Ctx:
         name = getattr(self.cfg, "run", None)
         if name:
             return runs / name
-        existing = sorted(p.name for p in runs.iterdir() if p.is_dir()) if runs.is_dir() else []
         if create:
             return runs / utcnow().strftime("%Y%m%d")
+        try:   # the run rank or quick wrote last; folder names alone mix up a rank and a quick check of the same day
+            cur = (runs / "CURRENT").read_text(encoding="utf-8").strip()
+            if cur and "/" not in cur and (runs / cur).is_dir():
+                return runs / cur
+        except OSError:
+            pass
+        existing = sorted(p.name for p in runs.iterdir() if p.is_dir()) if runs.is_dir() else []
         if existing:
             return runs / existing[-1]
         sys.exit(t("还没有分析结果，先运行 rank", "No analysis yet: run rank first"))
+
+    def set_current_run(self, rd):
+        rd.parent.mkdir(parents=True, exist_ok=True)
+        tmp = rd.parent / "CURRENT.tmp"
+        tmp.write_text(rd.name + "\n", encoding="utf-8")
+        os.replace(tmp, rd.parent / "CURRENT")
 
     def profile(self):
         return read_json(self.od / "profile.json", {}) or {}
@@ -1212,8 +1277,22 @@ def subject_states(events):
 
 
 def plan_digest(owner_id, subjects, expires):
+    """Digest of plans made before 0.5.0 (version 1): ids and mutual flags only."""
     payload = {"owner": str(owner_id), "expires": expires,
                "subjects": sorted([str(s["id"]), bool(s.get("mutual_ok"))] for s in subjects)}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def plan_sha(plan):
+    """The digest an approval binds to. Version 2 (0.5.0) also covers the owner's and every account's handle,
+    the mode (full or quick), and for a quick run the evidence digest and when its data was fetched."""
+    if plan.get("digest_v") != 2:
+        return plan_digest(plan["owner"]["id"], plan["subjects"], plan["expires"])
+    payload = {"v": 2, "owner": [str(plan["owner"]["id"]), str(plan["owner"]["handle"]).lower()],
+               "expires": plan["expires"], "mode": plan.get("mode") or "full", "evidence": plan.get("evidence") or "",
+               "fetched": plan.get("data_fetched") or "",
+               "subjects": sorted([str(s["id"]), str(s.get("handle", "")).lower(), bool(s.get("mutual_ok"))]
+                                  for s in plan["subjects"])}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -1408,6 +1487,7 @@ def cmd_rank(ctx):
              "interactions": {"covered_from": inter.get("covered_from"), "truncated": inter.get("truncated")},
              "collection_complete": ok, "review_hash": review_hash(prof, owner, accs), "accounts": accs}
     write_json(rd / "features.json", feats)
+    ctx.set_current_run(rd)
     msg = [t(f"规则打分完成：{len(accs)} 个账号 → {rd / 'features.json'}",
              f"Rule scoring done: {len(accs)} accounts → {rd / 'features.json'}")]
     if not ok:
@@ -1594,6 +1674,9 @@ def cmd_tiers(ctx):
     feats = read_json(rd / "features.json")
     if not feats:
         sys.exit(t("这次运行还没有 features.json（先运行 rank）", "No features.json in this run (run rank first)"))
+    if feats.get("mode") == "quick":
+        import xfa_quick
+        return xfa_quick.retier(ctx, rd, feats)
     prof = ctx.profile()
     owner = feats["owner"]
     if feats.get("review_hash") and review_hash(prof, prof.get("owner") or owner, feats["accounts"]) != feats["review_hash"]:
@@ -1844,6 +1927,14 @@ def cmd_plan(ctx):
     if not tiers:
         sys.exit(t("先运行 tiers", "Run tiers first"))
     rows = tiers["rows"]
+    mode = tiers.get("mode") or "full"
+    if mode == "quick" and not (tiers.get("quick") or {}).get("complete"):
+        sys.exit(t("这次快速检查的关注名单不完整，只能看报告，不能生成取关计划：按说明把名单拉全再跑 quick",
+                   "This quick check's following list is incomplete: report only, no plan. Fetch the whole list and run quick again"))
+    if mode == "quick":
+        problem = quick_data_problem((tiers.get("quick") or {}).get("fetched"), utcnow())
+        if problem:
+            sys.exit(problem)
     want = {x.strip().upper() for x in (cfg.tiers or "").split(",") if x.strip()}
     bad = want - {"T1", "T2", "T3"}
     if bad:
@@ -1883,13 +1974,18 @@ def cmd_plan(ctx):
         if not subjects:
             sys.exit(t("名单是空的", "The list is empty"))
         owner = prof.get("owner") or tiers["owner"]
+        if str(owner.get("id")) != str(tiers["owner"].get("id")):
+            sys.exit(t("个人设置里的账号和这次分析的账号 id 不一致：不能用别人的分析结果生成计划",
+                       "The profile's account id differs from this analysis's owner: refusing to plan from it"))
         days = math.ceil(len(subjects) / ctx.policy["daily_target"])
         pid = next_id(ctx.od / "plans", "P")
         expires = iso(now + timedelta(days=max(ctx.policy["plan_days_min"], days + 7)))
-        sha = plan_digest(owner["id"], subjects, expires)
         plan = {"schema": SCHEMA, "plan_id": pid, "owner": {"id": owner["id"], "handle": owner["handle"]}, "run": rd.name,
-                "created": iso(now), "expires": expires, "tiers": sorted(want), "subjects": subjects, "sha256": sha,
-                "status": "draft"}
+                "created": iso(now), "expires": expires, "tiers": sorted(want), "subjects": subjects, "digest_v": 2,
+                "mode": mode, "evidence": (tiers.get("quick") or {}).get("evidence") or "", "status": "draft"}
+        if mode == "quick":
+            plan["data_fetched"] = (tiers.get("quick") or {}).get("fetched")
+        sha = plan["sha256"] = plan_sha(plan)
         write_json(ctx.od / "plans" / f"{pid}.json", plan)
     by_tier = Counter(s["tier"] for s in subjects)
     print(t(f"计划 {pid}：用 @{owner['handle']}（ID {owner['id']}）取关 {len(subjects)} 个"
@@ -1900,6 +1996,12 @@ def cmd_plan(ctx):
             f"({', '.join(f'{tier_label(k)} {v}' for k, v in sorted(by_tier.items()))}). Excluded: {dict(skipped) or 'none'}. "
             f"Mutuals only if you named them. Up to {ctx.policy['daily_target']} a day, about {days} days; valid until "
             f"{expires[:10]}. Checksum {sha[:12]}."))
+    if mode == "quick":
+        print(t("这是快速检查的计划：只凭活跃度（复查过时间线）和回关判断，没看内容，也没核对你和他们的互动；"
+                "数据是 Bot 用 X 工具取的，脚本核对了格式和前后一致，证明不了来源。确认前可以先翻一下 report.md。",
+                "This plan comes from a quick check: activity (timelines checked) and follow-back only, no content and no "
+                "check of your interactions; the Bot fetched the data with its X tools, and the script checked its form "
+                "and consistency but cannot prove its source. Look through report.md before you confirm."))
     print(t(f"请用户明确回复确认，例如：「确认按计划 {pid} 取关这 {len(subjects)} 个」。确认后运行：approve {ctx.handle} {pid} --sha {sha[:12]}",
             f"Ask the user to confirm explicitly, e.g. \"Confirm plan {pid}: unfollow these {len(subjects)}\". Then run: "
             f"approve {ctx.handle} {pid} --sha {sha[:12]}"))
@@ -1919,7 +2021,7 @@ def plan_problem(plan, now, dry=False):
         return t("计划已撤销", "The plan was revoked")
     if parse_time(plan["expires"]) <= now:
         return t("计划已过期", "The plan expired")
-    digest = plan_digest(plan["owner"]["id"], plan["subjects"], plan["expires"])
+    digest = plan_sha(plan)
     if dry and plan.get("status") == "draft":
         return None if digest == plan.get("sha256") else t("计划内容被改过", "The plan was edited")
     if plan.get("status") != "approved":
@@ -1936,13 +2038,17 @@ def cmd_approve(ctx):
         sys.exit(t("校验值要写 plan 打印的那 12 位（或更长）十六进制", "Give the 12+ hex characters plan printed"))
     with ctx.lock():
         plan = load_plan(ctx, cfg.plan_id)
-        digest = plan_digest(plan["owner"]["id"], plan["subjects"], plan["expires"])
+        digest = plan_sha(plan)
         if digest != plan.get("sha256") or not digest.startswith(sha):
             sys.exit(t("校验值对不上：名单可能被改过，重新 plan", "Checksum mismatch: the list may have changed; plan again"))
         if plan.get("status") == "revoked":
             sys.exit(t("计划已撤销", "The plan was revoked"))
         if parse_time(plan["expires"]) <= utcnow():
             sys.exit(t("计划已过期，重新 plan", "The plan expired; plan again"))
+        if plan.get("mode") == "quick":
+            problem = quick_data_problem(plan.get("data_fetched"), utcnow())
+            if problem:
+                sys.exit(problem)
         plan.update(status="approved", approved=iso(utcnow()), approved_sha=digest, approval_note=cfg.note or "")
         write_json(ctx.od / "plans" / f"{plan['plan_id']}.json", plan)
     print(t(f"计划 {plan['plan_id']} 已批准：{len(plan['subjects'])} 个，有效期到 {plan['expires'][:10]}",
@@ -1983,6 +2089,13 @@ def cmd_batch(ctx):
                        f"has finished; if the page is gone, read the localStorage key that batch printed; if lost, use "
                        f"--abandon <batch> after it expired"))
         count = min(cfg.max or ctx.policy["batch_max"], ctx.policy["batch_max"])
+        expires = batch_deadline(ctx, cfg, plan, now)
+        # Only as many accounts as surely fit before the deadline: a real unfollow waits up to the longest gap.
+        fit = int((expires - now).total_seconds() // (25 if cfg.dry_run else ctx.policy["gap_s"][1]))
+        if fit < 1:
+            sys.exit(t(f"到 {iso(expires)} 前剩下的时间不够跑一批：下一轮任务开始时再发",
+                       f"Not enough time left before {iso(expires)} for a batch: issue it at the start of the next task"))
+        count = min(count, fit)
         if not cfg.dry_run and (caps["remaining"] <= 0 or parse_time(caps["next_eligible"]) > now):
             print(json.dumps({"eligible": False, "next_eligible": caps["next_eligible"], "caps": caps}, ensure_ascii=False))
             return
@@ -2000,7 +2113,6 @@ def cmd_batch(ctx):
         allowed = len(subjects) if cfg.dry_run else min(len(subjects), caps["remaining"])
         bid = next_id(ctx.od / "batches", "B")
         nonce = secrets.token_hex(8)
-        expires = min(now + timedelta(minutes=ctx.policy["batch_minutes"]), parse_time(plan["expires"]))
         config = {"version": 1, "batch_id": bid, "plan_id": plan["plan_id"], "nonce": nonce,
                   "owner": {"id": plan["owner"]["id"], "handle": plan["owner"]["handle"]},
                   "subjects": subjects, "allowed": allowed,
@@ -2032,6 +2144,25 @@ def cmd_batch(ctx):
             f"2. Once finished (status done or stopped), run xfaResult() on that page and save the text as "
             f"{bd / (bid + '.result.json')}; if the page is gone, read localStorage.getItem('{key}').\n"
             f"3. Run sync {ctx.handle} --file {bd / (bid + '.result.json')}. To stop early, run xfaStop() on the page."))
+
+
+def batch_deadline(ctx, cfg, plan, now):
+    """The earliest of: batch_minutes after issuing, the plan's expiry, and on Grok Bot TASK_MINUTES after the
+    task began, so the batch ends, and its result is read and synced, before the 50-minute task limit."""
+    deadline = min(now + timedelta(minutes=ctx.policy["batch_minutes"]), parse_time(plan["expires"]))
+    started = getattr(cfg, "task_start", None)
+    if started:
+        ts = parse_time(started)
+        if not ts or ts > now + timedelta(minutes=2):
+            sys.exit(t(f"--task-start {started!r} 不对：写这一轮任务开始的 UTC 时间，例如 2026-11-17T08:00:00Z",
+                       f"--task-start {started!r} is wrong: give the UTC time this task began, e.g. 2026-11-17T08:00:00Z"))
+        deadline = min(deadline, ts + timedelta(minutes=TASK_MINUTES))
+    elif ctx.policy["runtime"] == "grok-bot" and not cfg.dry_run:
+        sys.exit(t("在 Grok Bot 上发批次要带 --task-start（这一轮任务开始的 UTC 时间，可用 date -u +%Y-%m-%dT%H:%M:%SZ 取得）："
+                   "一轮任务 50 分钟就会被停掉，批次必须在这之前收尾",
+                   "On Grok Bot a batch needs --task-start (the UTC time this task began, e.g. from "
+                   "date -u +%Y-%m-%dT%H:%M:%SZ): a task is stopped after 50 minutes and the batch must end before that"))
+    return deadline
 
 
 def abandon_batch(ctx, plan, events, bid, now):
@@ -2140,6 +2271,10 @@ def cmd_verify(ctx):
     """Re-check with the API the accounts whose result is unclear (unknown, failed twice, post-menu
     path, already-not-following): about 30 credits each."""
     cfg = ctx.cfg
+    if load_plan(ctx, cfg.plan_id).get("mode") == "quick":   # never load a key or call the API for a quick plan
+        sys.exit(t("快速检查的计划不用接口核对：结果不明的账号保持不明，不会再被点；想确认就在浏览器里打开它的主页看按钮",
+                   "A quick-check plan is never re-checked by API: unclear accounts stay unclear and are never clicked "
+                   "again; open their profiles in the browser to look"))
     with ctx.lock():
         plan = load_plan(ctx, cfg.plan_id)
         events = load_events(ctx.od)
@@ -2201,7 +2336,10 @@ TIMER_JS = r"""(() => {
   return 'probe started ' + started;
 })()"""
 
-TIMER_CHECK_JS = r"""(() => { const v = JSON.parse(localStorage.getItem('xfa_probe_hb') || 'null'); if (!v) return 'no probe heartbeat'; return JSON.stringify(Object.assign(v, {age_s: Math.round((Date.now() - Date.parse(v.at)) / 1000), page_has_probe: !!window.__xfaProbe})); })()"""
+# A fresh last beat alone proves nothing: on Grok Bot the cloud computer sleeps between tasks and wakes for the
+# task that runs this check, so the timer has just beaten again. Count the beats instead: one at the start, then
+# one every 30 s for at most 3 hours; kept_running is false when more than two are missing.
+TIMER_CHECK_JS = r"""(() => { const v = JSON.parse(localStorage.getItem('xfa_probe_hb') || 'null'); if (!v) return 'no probe heartbeat'; const now = Date.now(); const due = 1 + Math.floor(Math.min(now - Date.parse(v.started), 3 * 3600e3) / 30000); return JSON.stringify(Object.assign(v, {age_s: Math.round((now - Date.parse(v.at)) / 1000), beats_due: due, beats_missing: Math.max(0, due - v.n), kept_running: due - v.n <= 2, page_has_probe: !!window.__xfaProbe})); })()"""
 
 
 def cmd_probe(cfg):
@@ -2285,6 +2423,7 @@ def add_subcommands(sub):
     p.add_argument("--max", type=int, default=0, help="本批最多几个账号（试运行也一样）/ accounts in this batch")
     p.add_argument("--dry-run", action="store_true", help="试运行：只看不点 / look, do not click")
     p.add_argument("--abandon", help="把过期后仍拿不到结果的批次记为不明 / mark an expired batch whose result is lost")
+    p.add_argument("--task-start", help="这一轮任务开始的 UTC 时间（Grok Bot 上必填）/ when this task began, UTC (required on Grok Bot)")
 
     p = common(sub.add_parser("sync", help="同步浏览器批次的结果 / record a batch's result"))
     p.add_argument("--file", required=True, help="xfaResult() 的输出文件，- 表示标准输入 / result file, - for stdin")
@@ -2298,6 +2437,15 @@ def add_subcommands(sub):
     p.add_argument("plan_id")
     p.add_argument("--max", type=int, default=100)
 
+    p = common(sub.add_parser("quick", help="免 key 快速检查：读 Grok Bot 存下的工具返回 / quick check from Grok Bot tool results, no key"))
+    p.add_argument("--me", required=True, help="get_users_me 的归档文件 / the saved get_users_me result")
+    p.add_argument("--following", nargs="+", required=True, metavar="FILE|TOKEN=FILE",
+                   help="关注名单各页，按拉取顺序：第一页直接写文件，之后每页写 翻页token=文件 / every page in fetch order: "
+                        "the first as FILE, each later one as TOKEN=FILE with the pagination_token used for it")
+    p.add_argument("--profiles", nargs="*", default=[], help="get_users_by_usernames 的归档文件 / saved profile batches")
+    p.add_argument("--timeline", nargs="*", default=[], metavar="ID=FILE",
+                   help="待复查账号的时间线：账号id=get_users_posts 的归档文件 / id=saved timeline of a candidate")
+
     p = sub.add_parser("probe", help="打印只读的页面探针脚本 / print the read-only page probe")
     p.add_argument("handle", nargs="?", help="可省略 / optional")
     p.add_argument("--timer", action="store_true", help="计时器存活测试（写心跳）/ timer survival test")
@@ -2307,7 +2455,8 @@ def add_subcommands(sub):
 
 COMMANDS = {"rank": cmd_rank, "profile": cmd_profile, "judge": cmd_judge, "tiers": cmd_tiers, "decide": cmd_decide,
             "plan": cmd_plan, "approve": cmd_approve, "revoke": cmd_revoke, "batch": cmd_batch, "sync": cmd_sync,
-            "status": cmd_status, "verify": cmd_verify}
+            "status": cmd_status, "verify": cmd_verify,
+            "quick": lambda ctx: __import__("xfa_quick").cmd_quick(ctx)}
 
 
 def run(cfg):

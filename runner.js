@@ -133,7 +133,10 @@
     let timer;
     const finish = () => {
       clearTimeout(timer); callbacks.delete(id);
-      if (active && active.clicked && Date.now() - began > ms + 60000) stopped = stopped || 'verification_interrupted';
+      // A wait that ends a minute or more late means the computer slept (Grok Bot's cloud computer sleeps between
+      // tasks; a Mac sleeps with its lid closed). Never carry on clicking after that: stop the batch.
+      if (Date.now() - began > ms + 60000)
+        stopped = stopped || (active && active.clicked ? 'verification_interrupted' : 'paused_too_long');
       resolve();
     };
     callbacks.set(id, finish);
@@ -466,7 +469,8 @@
       const reasons = {user_requested: '用户停止', expired: '批次已到期', identity_mismatch: '身份不符',
         login_or_verification: '需要登录或验证', rate_limited: '出现限制提示', three_failures: '连续三次失败',
         allowed_reached: '已达本批点击上限', page_left: '已离开目标页面', heartbeat_or_storage_lost: '心跳或存储不可用',
-        lock_lost: '执行锁已失效', verification_interrupted: '结果核对被打断', confirm_mismatch: '确认目标不符'};
+        lock_lost: '执行锁已失效', verification_interrupted: '结果核对被打断', confirm_mismatch: '确认目标不符',
+        paused_too_long: '电脑休眠过，本批停止'};
       st.message = c.lang === 'zh' ? '已停止：' + (reasons[stopped] || '运行异常') : 'Stopped: ' + (stopped || 'internal_error');
       if (active) {
         const s = c.subjects.find(s => s.id === active.id);
