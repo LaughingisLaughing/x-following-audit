@@ -24,6 +24,7 @@ Reports go to ~/Downloads/x-following-audit, never into the skill folder.
 import argparse
 import csv
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -39,9 +40,21 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT = Path("~/Downloads/x-following-audit").expanduser()
+
+
+def data_home():
+    """Where reports, state and the file cache live: $XFA_HOME, else /workspace/xfa on a cloud
+    computer that has a writable /workspace (Grok Bot keeps that folder), else DEFAULT_OUT."""
+    env = os.environ.get("XFA_HOME", "").strip()
+    if env:
+        return Path(env).expanduser()
+    ws = Path("/workspace")
+    if ws.is_dir() and os.access(ws, os.W_OK):
+        return ws / "xfa"
+    return DEFAULT_OUT
 LANG = "zh"  # set from --lang; picks the language of progress and error messages
 
 API_BASE = "https://api.twitterapi.io"
@@ -122,10 +135,16 @@ def read_vault(path, names):
 # ============================================================================
 
 class Cache:
-    def __init__(self, enabled=True):
+    """cache-vault when it is installed; otherwise one JSON file per key under file_dir (a cloud
+    computer such as Grok Bot's keeps /workspace between tasks); otherwise memory only.
+    XFA_CACHE=vault|files|memory forces a backend."""
+
+    def __init__(self, enabled=True, file_dir=None):
         self.vault = None
+        self.files = None
         self.mem = {}
-        if enabled and (CACHE_VAULT_DIR / "cache_vault" / "store.py").exists():
+        mode = os.environ.get("XFA_CACHE", "auto").strip().lower()
+        if enabled and mode in ("auto", "vault") and (CACHE_VAULT_DIR / "cache_vault" / "store.py").exists():
             sys.path.insert(0, str(CACHE_VAULT_DIR))
             try:
                 from cache_vault.store import Vault
@@ -135,29 +154,64 @@ class Cache:
                       file=sys.stderr)
             finally:
                 sys.path.remove(str(CACHE_VAULT_DIR))
+        if enabled and self.vault is None and file_dir and mode in ("auto", "files"):
+            self.files = Path(file_dir).expanduser()
+            self.files.mkdir(parents=True, exist_ok=True)
 
     @property
     def backend(self):
-        return f"cache-vault:{NS}" if self.vault else "memory"
+        if self.vault:
+            return f"cache-vault:{NS}"
+        return f"files:{self.files}" if self.files else "memory"
 
-    def get(self, key):
+    def _path(self, key):
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)[:100]
+        return self.files / f"{safe}-{hashlib.sha1(key.encode('utf-8')).hexdigest()[:10]}.json"
+
+    def get(self, key, stale_ok=False):
+        """The cached value, or None once it has expired (stale_ok returns it anyway)."""
         if self.vault:
             e = self.vault.get_fresh(key)
+            if e is None and stale_ok:
+                e = self.vault.get(key, _log_hit=False)
             return e.value if e else None
+        if self.files:
+            try:
+                rec = json.loads(self._path(key).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+            exp = rec.get("expires")
+            return rec.get("value") if exp is None or exp > time.time() or stale_ok else None
         hit = self.mem.get(key)
-        if hit and (hit[1] is None or hit[1] > time.time()):
+        if hit and (hit[1] is None or hit[1] > time.time() or stale_ok):
             return hit[0]
         return None
 
     def put(self, key, value, ttl=None):
         if self.vault:
             self.vault.put(key, namespace=NS, value=value, ttl_seconds=ttl)
+        elif self.files:
+            path = self._path(key)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps({"key": key, "expires": time.time() + ttl if ttl else None, "value": value},
+                                      ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
         else:
             self.mem[key] = (value, time.time() + ttl if ttl else None)
 
     def items(self, prefix):
         if self.vault:
             return [(e.key, e.value) for e in self.vault.list_entries(NS) if e.key.startswith(prefix)]
+        if self.files:
+            out = []
+            for path in self.files.glob("*.json"):
+                try:
+                    rec = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if str(rec.get("key", "")).startswith(prefix):
+                    out.append((rec["key"], rec.get("value")))
+            return out
         return [(k, v[0]) for k, v in self.mem.items() if k.startswith(prefix)]
 
 
@@ -239,6 +293,14 @@ def load_keys():
     env = os.environ.get("TWITTERAPI_IO_KEY", "").strip()
     if env:
         return [("TWITTERAPI_IO_KEY", env)]
+    key_file = os.environ.get("XFA_KEY_FILE", "").strip()
+    if key_file:  # a file holding only the key, e.g. where a cloud computer stores a secret
+        try:
+            k = Path(key_file).expanduser().read_text(encoding="utf-8").strip().splitlines()[0].strip()
+        except (OSError, IndexError):
+            k = ""
+        if k:
+            return [("XFA_KEY_FILE", k)]
     if VAULT_FILE.exists():
         found = read_vault(VAULT_FILE, VAULT_KEYS)
         keys = [(n, found[n]) for n in VAULT_KEYS if found.get(n)]
@@ -669,7 +731,7 @@ def audit(cfg):
         sys.exit("没有 twitterapi.io key：设置环境变量 TWITTERAPI_IO_KEY，或在终端里运行以手动输入。\n"
                  "No twitterapi.io key: set TWITTERAPI_IO_KEY, or run this in a terminal and paste the key when asked.")
     api = TwitterApi(keys)
-    cache = Cache(enabled=not cfg.no_cache)
+    cache = Cache(enabled=not cfg.no_cache, file_dir=data_home() / "cache")
     credits_before = api.credits()
 
     # Phase 1: followings list
@@ -900,12 +962,23 @@ def main(argv=None):
                    help="报告目录（默认 ~/Downloads/x-following-audit）/ output folder (default ~/Downloads/x-following-audit)")
     a.add_argument("--no-cache", action="store_true", help="不读写 cache-vault / don't use cache-vault")
     a.add_argument("--quiet", action="store_true", help="不打印进度，只输出摘要 / summary only, no progress")
+    # The tiered review and the paced unfollow batches live in xfa_tiers.py. It imports this module
+    # as "xfa"; when this file runs as a script, point that name here instead of loading a second copy.
+    sys.modules.setdefault("xfa", sys.modules[__name__])
+    try:
+        import xfa_tiers
+    except ImportError:  # only xfa.py was downloaded: audit still works on its own
+        xfa_tiers = None
+    if xfa_tiers:
+        xfa_tiers.add_subcommands(sub)
     cfg = p.parse_args(argv)
-    cfg.out = cfg.out.expanduser().resolve()
     global LANG
     LANG = cfg.lang
     if cfg.cmd == "audit":
+        cfg.out = cfg.out.expanduser().resolve()
         audit(cfg)
+    else:
+        xfa_tiers.run(cfg)
 
 
 if __name__ == "__main__":
