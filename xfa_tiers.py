@@ -98,6 +98,8 @@ def quick_data_problem(fetched, now):
     at = parse_time(fetched)
     if not at:
         return t("快速检查的结果里没有取数时间，重新跑 quick", "The quick check has no fetch time: run quick again")
+    if at > now + timedelta(minutes=10):
+        return t("快速检查的取数时间在未来：重新跑 quick", "The quick check's fetch time is in the future: run quick again")
     if now - at > timedelta(days=QUICK_MAX_AGE_DAYS):
         return t(f"快速检查的数据是 {(now - at).days} 天前拉的，超过 {QUICK_MAX_AGE_DAYS} 天：重新拉数据、重新跑 quick 再生成计划",
                  f"The quick check's data is {(now - at).days} days old, more than {QUICK_MAX_AGE_DAYS}: fetch again and rerun "
@@ -158,6 +160,8 @@ LABELS = {
     "timeline_inconsistent": ("复查的时间线里没有资料说的那条最近一帖（旧文件、过滤过，或帖子没了）",
                               "The timeline lacks the post the profile calls the latest (stale, filtered, or gone)"),
     "privacy_conflict": ("名单和补充资料对是否私密说法不一", "The list and the extra profiles disagree on privacy"),
+    "relation_conflict": ("页面和资料对关注关系说法不一（可能刚关注或取关过）",
+                          "The page and the profile disagree on who follows whom (it may have just changed)"),
 }
 TAGS = {"giveaway", "shill", "bot", "dead_project", "reposts", "rare", "language", "off_topic", "low_signal",
         "source", "relationship", "other"}
@@ -1932,7 +1936,9 @@ def cmd_plan(ctx):
         sys.exit(t("这次快速检查的关注名单不完整，只能看报告，不能生成取关计划：按说明把名单拉全再跑 quick",
                    "This quick check's following list is incomplete: report only, no plan. Fetch the whole list and run quick again"))
     if mode == "quick":
-        problem = quick_data_problem((tiers.get("quick") or {}).get("fetched"), utcnow())
+        problem = (quick_data_problem((tiers.get("quick") or {}).get("fetched"), utcnow()) or
+                   __import__("xfa_quick").recheck_run(ctx, rd, (tiers.get("quick") or {}).get("evidence"),
+                                                       (tiers.get("quick") or {}).get("fetched")))
         if problem:
             sys.exit(problem)
     want = {x.strip().upper() for x in (cfg.tiers or "").split(",") if x.strip()}
@@ -1997,11 +2003,16 @@ def cmd_plan(ctx):
             f"Mutuals only if you named them. Up to {ctx.policy['daily_target']} a day, about {days} days; valid until "
             f"{expires[:10]}. Checksum {sha[:12]}."))
     if mode == "quick":
+        browser = (tiers.get("quick") or {}).get("source") == "browser"
         print(t("这是快速检查的计划：只凭活跃度（复查过时间线）和回关判断，没看内容，也没核对你和他们的互动；"
-                "数据是 Bot 用 X 工具取的，脚本核对了格式和前后一致，证明不了来源。确认前可以先翻一下 report.md。",
+                + ("名单是浏览器里的脚本从你的关注页读的，资料和时间线是 Bot 用 X 工具取的；" if browser else
+                   "数据是 Bot 用 X 工具取的；")
+                + "脚本核对了格式和前后一致，证明不了来源。确认前可以先翻一下 report.md。",
                 "This plan comes from a quick check: activity (timelines checked) and follow-back only, no content and no "
-                "check of your interactions; the Bot fetched the data with its X tools, and the script checked its form "
-                "and consistency but cannot prove its source. Look through report.md before you confirm."))
+                "check of your interactions; "
+                + ("the list was read from your Following page by the browser script, profiles and timelines fetched by "
+                   "the Bot with its X tools; " if browser else "the Bot fetched the data with its X tools; ")
+                + "the script checked form and consistency but cannot prove the source. Look through report.md before you confirm."))
     print(t(f"请用户明确回复确认，例如：「确认按计划 {pid} 取关这 {len(subjects)} 个」。确认后运行：approve {ctx.handle} {pid} --sha {sha[:12]}",
             f"Ask the user to confirm explicitly, e.g. \"Confirm plan {pid}: unfollow these {len(subjects)}\". Then run: "
             f"approve {ctx.handle} {pid} --sha {sha[:12]}"))
@@ -2046,7 +2057,9 @@ def cmd_approve(ctx):
         if parse_time(plan["expires"]) <= utcnow():
             sys.exit(t("计划已过期，重新 plan", "The plan expired; plan again"))
         if plan.get("mode") == "quick":
-            problem = quick_data_problem(plan.get("data_fetched"), utcnow())
+            problem = (quick_data_problem(plan.get("data_fetched"), utcnow()) or
+                       __import__("xfa_quick").recheck_run(ctx, ctx.od / "runs" / str(plan.get("run") or ""), plan.get("evidence"),
+                                                           plan.get("data_fetched")))
             if problem:
                 sys.exit(problem)
         plan.update(status="approved", approved=iso(utcnow()), approved_sha=digest, approval_note=cfg.note or "")
@@ -2437,11 +2450,17 @@ def add_subcommands(sub):
     p.add_argument("plan_id")
     p.add_argument("--max", type=int, default=100)
 
-    p = common(sub.add_parser("quick", help="免 key 快速检查：读 Grok Bot 存下的工具返回 / quick check from Grok Bot tool results, no key"))
-    p.add_argument("--me", required=True, help="get_users_me 的归档文件 / the saved get_users_me result")
-    p.add_argument("--following", nargs="+", required=True, metavar="FILE|TOKEN=FILE",
-                   help="关注名单各页，按拉取顺序：第一页直接写文件，之后每页写 翻页token=文件 / every page in fetch order: "
-                        "the first as FILE, each later one as TOKEN=FILE with the pagination_token used for it")
+    p = common(sub.add_parser("export", help="生成读关注页的只读脚本（免费拿名单）/ write the read-only script that saves your Following list"))
+    p.add_argument("--task-start", help="这一轮任务开始的 UTC 时间（Grok Bot 上必填）/ when this task began, UTC (required on Grok Bot)")
+
+    p = common(sub.add_parser("quick", help="免 key 快速检查：读浏览器导出的名单或 Grok Bot 存下的工具返回 / quick check, no key"))
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--browser-list", metavar="FILE",
+                     help="export 脚本下载的名单文件（免费）/ the list file the export script saved (free)")
+    src.add_argument("--following", nargs="+", metavar="FILE|TOKEN=FILE",
+                     help="X 插件拉的关注名单各页（付费），按拉取顺序：第一页直接写文件，之后每页写 翻页token=文件 / the X plugin "
+                          "pages (paid) in fetch order: the first as FILE, each later one as TOKEN=FILE")
+    p.add_argument("--me", help="get_users_me 的归档文件（用 --following 时必填）/ the saved get_users_me result (needed with --following)")
     p.add_argument("--profiles", nargs="*", default=[], help="get_users_by_usernames 的归档文件 / saved profile batches")
     p.add_argument("--timeline", nargs="*", default=[], metavar="ID=FILE",
                    help="待复查账号的时间线：账号id=get_users_posts 的归档文件 / id=saved timeline of a candidate")
@@ -2456,7 +2475,8 @@ def add_subcommands(sub):
 COMMANDS = {"rank": cmd_rank, "profile": cmd_profile, "judge": cmd_judge, "tiers": cmd_tiers, "decide": cmd_decide,
             "plan": cmd_plan, "approve": cmd_approve, "revoke": cmd_revoke, "batch": cmd_batch, "sync": cmd_sync,
             "status": cmd_status, "verify": cmd_verify,
-            "quick": lambda ctx: __import__("xfa_quick").cmd_quick(ctx)}
+            "quick": lambda ctx: __import__("xfa_quick").cmd_quick(ctx),
+            "export": lambda ctx: __import__("xfa_quick").cmd_export(ctx)}
 
 
 def run(cfg):

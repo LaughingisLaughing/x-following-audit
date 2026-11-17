@@ -8,7 +8,7 @@
 
 - `audit`：找出不活跃、低活跃的账号，不会替你取关任何人。
 - 分级清理（0.4.0 新增）：把你关注的人分成几级，你选要清理哪几级，然后只按你确认过的名单，在你自己已登录的浏览器里慢慢取关。见[分级清理](#分级清理040)。
-- 免 key 快速检查（0.5.0 新增）：在 Grok Bot 里没有 twitterapi.io key 也能用，只看谁很久没发帖、谁回关了你、谁是私密账号。见[在 Grok Bot 里用](#在-grok-bot-里用)。
+- 免 key 快速检查（0.5.0 新增，0.6.0 起不花钱）：在 Grok Bot 里没有 twitterapi.io key 也能用，关注名单从云浏览器里读，不花 X 开发者账号的钱；只看谁很久没发帖、谁回关了你、谁是私密账号。见[在 Grok Bot 里用](#在-grok-bot-里用)。
 
 它接替已经下线的网页版「X Follower Tool / 关注列表分析器」（twitter-unfollow.up.railway.app），判定规则不变。
 
@@ -45,7 +45,7 @@ python3 xfa.py audit your_handle
 
 ## 分级清理（0.4.0）
 
-先拿到全部文件（分级清理需要 `xfa_tiers.py` 和 `runner.js` 跟 `xfa.py` 放在一起）：
+先拿到全部文件（分级清理需要 `xfa_tiers.py` 和 `runner.js`，快速检查还需要 `xfa_quick.py` 和 `following.js`，都跟 `xfa.py` 放在一起）：
 
 ```bash
 git clone https://github.com/LaughingisLaughing/x-following-audit.git && cd x-following-audit
@@ -93,9 +93,10 @@ git clone https://github.com/LaughingisLaughing/x-following-audit.git && cd x-fo
 
 整个流程可以放在 [Grok Bot](https://docs.x.ai/grok-bot/overview) 的云电脑上跑，用 routine 每两小时续跑一批。先看 [cloud/grok-bot-first-run.zh-CN.md](cloud/grok-bot-first-run.zh-CN.md)，再把 [cloud/grok-bot-skill.zh-CN.md](cloud/grok-bot-skill.zh-CN.md) 和 [cloud/grok-bot-routine.zh-CN.md](cloud/grok-bot-routine.zh-CN.md) 发给 Bot。
 
-**没有 twitterapi.io key 也能用（快速检查，0.5.0）**：
+**没有 twitterapi.io key 也能用（快速检查；0.6.0 起名单从浏览器读）**：
 
-- Bot 用自带的 X 工具取数，存成文件，`python3 xfa.py quick <你的账号> --me ... --following ...` 只读这些文件。关注名单要用 Grok Bot 里连接的 X 插件，会从你的 X 开发者账号按量扣费（每个关注约 0.001-0.01 美元），Bot 会先报数、等你确认。
+- 名单：`python3 xfa.py export <你的账号>` 生成一份只读脚本，在云浏览器刚加载的 x.com/home 控制台执行。它自己打开你的关注页往下滚，只听页面自己发出的请求，不发自己的请求；唯一会点的是列表出错时列表自己的「重试」。最后下载一份名单文件，不花钱。第一页起每一页都听到、最后到底，才算读完整；读不完整只出报告。
+- 资料和时间线：Bot 用自带的 X 工具取数，存成文件（自带读取按用户每天 1,000 次，不花钱）；`python3 xfa.py quick <你的账号> --browser-list <名单文件> --profiles ... --timeline ...` 只读这些文件。用 Grok Bot 里连接的 X 插件拉名单（`--me ... --following ...`，按量扣费）只是备选，要你先给美元上限。
 - 只判断「当前帖子计数为 0」和「半年以上没发帖」：先按资料筛出来，再逐个复查时间线（含回复和转发）确认，才进二级。回关了的单列成互关。
 - 不看内容，也不核对你和他们的互动；结果不明的账号没法再用接口核对，只会保持不明、不会再被点。
 - Grok Bot 一轮任务最长 50 分钟，任务之间云电脑会休眠，所以每一批取关都在同一轮任务里开始、等完、同步（`batch` 要带 `--task-start`）。

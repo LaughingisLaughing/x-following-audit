@@ -204,7 +204,8 @@
       foreign: elements.some(e => /^\d+-(?:unfollow|follow)$/.test(e.getAttribute('data-testid') || '') && !own.includes(e))};
   };
   const target = s => inPath(s) && controls(s).own.length > 0;
-  const mutual = () => !!q('[data-testid="userFollowIndicator"]');
+  // only the profile header's own mark: recommendation cards, posts, dialogs and menus can carry other accounts' marks
+  const mutual = () => header().some(e => e.getAttribute('data-testid') === 'userFollowIndicator');
   const go = s => {
     guard(); history.pushState({}, '', '/i/user/' + s.id);
     dispatchEvent(new PopStateEvent('popstate', {state: {}}));

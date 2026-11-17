@@ -12,9 +12,9 @@ Grok Bot 的文档没写清几件事，第一次要逐项验证，全部通过�
 
 | # | 验证什么 | 发给 Bot 的话 | 通过的标准 | 不通过怎么办 |
 |---|---|---|---|---|
-| 1 | 拿到代码 | 「在云电脑上运行：`git clone https://github.com/LaughingisLaughing/x-following-audit.git /workspace/xfa/app && git -C /workspace/xfa/app checkout v0.5.0 && python3 --version && python3 /workspace/xfa/app/xfa.py --version`」 | 打印 Python 3.8 以上和 `x-following-audit 0.5.0` | Python 太旧，就请 Bot 装 3.11 |
+| 1 | 拿到代码 | 「在云电脑上运行：`git clone https://github.com/LaughingisLaughing/x-following-audit.git /workspace/xfa/app && git -C /workspace/xfa/app checkout v0.6.0 && python3 --version && python3 /workspace/xfa/app/xfa.py --version`」 | 打印 Python 3.8 以上和 `x-following-audit 0.6.0` | Python 太旧，就请 Bot 装 3.11 |
 | 2 | `/workspace` 能保留 | 「写一个文件 `/workspace/xfa/persist-test.txt`，内容是现在的时间。」等这个任务结束，下一次再问：「读一下 `/workspace/xfa/persist-test.txt`。」 | 读得到同一个时间 | 不启用续跑 |
-| 3 | 数据从哪来 | 快速检查：「`get_users_me` 带 `user.fields=public_metrics`，打开 `write_to_file`，告诉我文件路径和关注数。」完整检查：「我会在安全密钥卡片里给你 twitterapi.io 的 key，用不会进聊天和命令记录的方式交给脚本，然后运行 `xfa rank <你的账号> --estimate`。」 | 快速检查拿到文件路径和关注数；完整检查打印出估算积分 | 快速检查拿不到，看 X 插件有没有连上；完整检查换一种已验证的交 key 方式 |
+| 3 | 数据从哪来 | 快速检查：「用自带的 `get_users_by_usernames` 查我自己的用户名，`user.fields` 带 `public_metrics`，打开 `write_to_file`，告诉我文件路径、关注数和返回末尾的剩余额度。」（关注名单之后在云浏览器里读，不用 X 插件）完整检查：「我会在安全密钥卡片里给你 twitterapi.io 的 key，用不会进聊天和命令记录的方式交给脚本，然后运行 `xfa rank <你的账号> --estimate`。」 | 快速检查拿到文件路径和关注数；完整检查打印出估算积分 | 快速检查拿不到，看返回里的额度说明，用完了等 UTC 0 点；完整检查换一种已验证的交 key 方式 |
 | 4 | 登录 X | 「打开云浏览器的 x.com/home。没登录、或者登录的不是我的个人号，就把屏幕交给我。」你自己登录或切换到个人账号 | 首页显示你的个人账号 | 有验证就照提示做；登录不了就停 |
 | 5 | 页面里能执行只读脚本 | 「运行 `xfa probe <你的账号>`，把它打印的脚本在 x.com 标签页的控制台里执行，把返回结果给我看。要求输入 `allow pasting` 时停下来，把屏幕交给我。」 | `profileLink` 是你的主页，`switcherHandles` 里有你的账号，`twidReadable` 是 true | 执行不了就不能自动取关，停在这里 |
 | 6 | 计时器在任务之间还跑不跑 | 「运行 `xfa probe <你的账号> --timer`，把打印的脚本在 x.com 标签页执行。」结束任务，过 15 分钟、90 分钟后各问一次：「运行 `xfa probe <你的账号> --timer-check`，执行它打印的脚本，把结果给我。」 | 看 `kept_running` 和 `beats_missing`，不要只看 `age_s`（新任务会把云电脑叫醒，最后一跳总是很近）。2026-11 实测：任务之间会停 | 会停是常态：每批都在一轮任务里跑完（第 7 步） |

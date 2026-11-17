@@ -40,7 +40,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT = Path("~/Downloads/x-following-audit").expanduser()
 
